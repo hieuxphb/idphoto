@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Gender, TargetType, ClothingType, HairstyleType, BackgroundColor, 
   PhotoSize, PaperSize, PhotoSettings, ProcessingState, BatchItem 
@@ -22,6 +22,42 @@ const DEFAULT_SETTINGS: PhotoSettings = {
   paperSize: PaperSize.A6
 };
 
+// Rate limiter class
+class RateLimiter {
+  private requests: number[] = [];
+  private readonly limit: number;
+  private readonly windowMs: number;
+
+  constructor(limit: number = 8, windowMs: number = 60000) {
+    this.limit = limit; // 8 requests
+    this.windowMs = windowMs; // per 60 seconds
+  }
+
+  canMakeRequest(): boolean {
+    const now = Date.now();
+    this.requests = this.requests.filter(time => now - time < this.windowMs);
+    return this.requests.length < this.limit;
+  }
+
+  addRequest(): void {
+    this.requests.push(Date.now());
+  }
+
+  getWaitTime(): number {
+    if (this.requests.length === 0) return 0;
+    const oldest = this.requests[0];
+    const now = Date.now();
+    const elapsed = now - oldest;
+    return Math.max(0, this.windowMs - elapsed);
+  }
+
+  getRemainingRequests(): number {
+    const now = Date.now();
+    this.requests = this.requests.filter(time => now - time < this.windowMs);
+    return Math.max(0, this.limit - this.requests.length);
+  }
+}
+
 const App: React.FC = () => {
   const [state, setState] = useState<ProcessingState>({
     originalImage: null,
@@ -34,20 +70,30 @@ const App: React.FC = () => {
   const [showPrintLayout, setShowPrintLayout] = useState(false);
   const [activeBatchIndex, setActiveBatchIndex] = useState<number | null>(null);
   
-  // Load custom key from storage
   const [customApiKey, setCustomApiKey] = useState<string>(() => localStorage.getItem('custom_gemini_api_key') || '');
   const [hasApiKey, setHasApiKey] = useState<boolean>(false);
   const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
+  
+  // Rate limiter
+  const rateLimiter = useRef(new RateLimiter(8, 60000)); // 8 requests per minute
+  const [remainingRequests, setRemainingRequests] = useState(8);
 
   useEffect(() => {
     const checkStatus = async () => {
       // @ts-ignore
       const systemHasKey = await window.aistudio?.hasSelectedApiKey();
-      // Has key if custom key is set OR system key is selected OR process.env.API_KEY exists
       setHasApiKey(!!customApiKey || !!systemHasKey || !!process.env.API_KEY);
     };
     checkStatus();
   }, [customApiKey]);
+
+  // Update remaining requests every second
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setRemainingRequests(rateLimiter.current.getRemainingRequests());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   const handleOpenConfig = () => {
     setIsConfigOpen(true);
@@ -61,7 +107,6 @@ const App: React.FC = () => {
       localStorage.removeItem('custom_gemini_api_key');
     }
     
-    // Attempt to sync with system key selection if available
     // @ts-ignore
     if (window.aistudio?.openSelectKey && !newKey) {
       try {
@@ -111,20 +156,35 @@ const App: React.FC = () => {
       handleOpenConfig();
       return;
     }
+
+    // Check rate limit
+    if (!rateLimiter.current.canMakeRequest()) {
+      const waitTime = Math.ceil(rateLimiter.current.getWaitTime() / 1000);
+      alert(`⏱️ Giới hạn tốc độ: Vui lòng chờ ${waitTime} giây trước khi xử lý tiếp.\n\nAPI Key miễn phí chỉ cho phép 8 yêu cầu/phút để tránh lỗi 429.`);
+      return;
+    }
     
     setState(prev => ({ ...prev, isProcessing: true }));
+    
     try {
+      rateLimiter.current.addRequest();
+      setRemainingRequests(rateLimiter.current.getRemainingRequests());
+      
       const result = await processIDPhoto(state.originalImage, state.settings, customApiKey);
       setState(prev => ({ ...prev, processedImage: result, isProcessing: false }));
+      
       if (activeBatchIndex !== null) {
-        setBatchItems(prev => prev.map((item, idx) => idx === activeBatchIndex ? { ...item, processed: result, status: 'completed' } : item));
+        setBatchItems(prev => prev.map((item, idx) => 
+          idx === activeBatchIndex ? { ...item, processed: result, status: 'completed' } : item
+        ));
       }
     } catch (error: any) {
       console.error("Process Error:", error);
       const errorMsg = error.message || "";
       
       if (errorMsg.includes("429") || errorMsg.includes("Too Many Requests")) {
-        alert("Lỗi 429: API Key miễn phí đã hết lượt sử dụng trong phút này. Vui lòng chờ 1 phút rồi thử lại.");
+        const waitTime = Math.ceil(rateLimiter.current.getWaitTime() / 1000);
+        alert(`⚠️ Lỗi 429: Đã vượt quá giới hạn API.\n\nAPI Key miễn phí chỉ cho phép 8-10 yêu cầu/phút.\n\nVui lòng chờ ${waitTime} giây và thử lại.\n\n💡 Mẹo: Xử lý từng ảnh một, chờ khoảng 8-10 giây giữa mỗi lần xử lý.`);
       } else if (errorMsg.includes("403") || errorMsg.includes("PERMISSION_DENIED")) {
         alert("Lỗi 403: API Key không có quyền sử dụng mô hình này hoặc dự án chưa được kích hoạt.");
         handleOpenConfig();
@@ -148,15 +208,36 @@ const App: React.FC = () => {
       return;
     }
 
+    // Check if we can process all items
+    const canProcess = rateLimiter.current.getRemainingRequests();
+    if (canProcess < pendingItems.length) {
+      alert(`⏱️ Chỉ có thể xử lý ${canProcess} ảnh nữa trong phút này.\n\nAPI Key miễn phí giới hạn 8 yêu cầu/phút.\n\nVui lòng:\n- Xử lý ${canProcess} ảnh trước\n- Chờ 1 phút\n- Tiếp tục xử lý ${pendingItems.length - canProcess} ảnh còn lại`);
+      return;
+    }
+
     setState(prev => ({ ...prev, isProcessing: true }));
+    
     for (const item of pendingItems) {
+      if (!rateLimiter.current.canMakeRequest()) {
+        const waitTime = rateLimiter.current.getWaitTime();
+        alert(`⏱️ Đang chờ ${Math.ceil(waitTime / 1000)} giây để tiếp tục...`);
+        await new Promise(resolve => setTimeout(resolve, waitTime + 1000));
+      }
+      
       try {
+        rateLimiter.current.addRequest();
+        setRemainingRequests(rateLimiter.current.getRemainingRequests());
+        
         const result = await processIDPhoto(item.original, state.settings, customApiKey);
         setBatchItems(prev => prev.map(it => it.id === item.id ? { ...it, processed: result, status: 'completed' } : it));
+        
+        // Wait 8 seconds between requests to avoid rate limit
+        await new Promise(resolve => setTimeout(resolve, 8000));
       } catch (err) {
         setBatchItems(prev => prev.map(it => it.id === item.id ? { ...it, status: 'error' } : it));
       }
     }
+    
     setState(prev => ({ ...prev, isProcessing: false }));
   };
 
@@ -243,7 +324,15 @@ const App: React.FC = () => {
         
         <main className="flex-1 flex flex-col overflow-hidden bg-[#1e293b]/20">
           <div className="h-10 border-b border-slate-800 bg-[#0f172a]/50 flex items-center justify-between px-4 shrink-0">
-            <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Kết quả xem trước</span>
+            <div className="flex items-center gap-3">
+              <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">Kết quả xem trước</span>
+              {hasApiKey && (
+                <div className="flex items-center gap-1.5 px-2 py-0.5 bg-slate-800/50 rounded text-[9px]">
+                  <div className={`w-1.5 h-1.5 rounded-full ${remainingRequests > 3 ? 'bg-green-500' : remainingRequests > 0 ? 'bg-yellow-500' : 'bg-red-500'}`}></div>
+                  <span className="text-slate-400">Còn lại: <span className="text-slate-200 font-semibold">{remainingRequests}/8</span> requests/phút</span>
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-2">
               <button 
                 onClick={() => setShowPrintLayout(true)}
