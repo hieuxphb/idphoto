@@ -1,75 +1,174 @@
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import { PhotoSettings, BackgroundColor } from "../types";
 
-import { GoogleGenAI } from "@google/genai";
-import { PhotoSettings, BackgroundColor, ClothingType, HairstyleType, PhotoSize } from "../types";
+/**
+ * QUAN TRỌNG: Gemini API KHÔNG THỂ chỉnh sửa hoặc tạo ảnh.
+ * Nó chỉ có thể:
+ * 1. Phân tích ảnh
+ * 2. Đưa ra hướng dẫn chỉnh sửa
+ * 3. Tạo text description
+ * 
+ * Để thực sự chỉnh sửa ảnh, bạn cần:
+ * - Imagen API (Google, trả phí)
+ * - DALL-E 3 (OpenAI, trả phí)
+ * - Stable Diffusion API (trả phí)
+ * - Hoặc xử lý ảnh bằng Canvas/WebGL
+ */
 
+// Helper: Convert background color to hex
+const getBackgroundHex = (color: BackgroundColor): string => {
+  const colorMap: Record<BackgroundColor, string> = {
+    'Xanh': '#4A90E2',
+    'Trắng': '#FFFFFF',
+    'Xám': '#E5E5E5',
+    'Xanh Đậm': '#1E3A8A'
+  };
+  return colorMap[color] || '#4A90E2';
+};
+
+// Helper: Basic image processing với Canvas
+const processImageWithCanvas = async (
+  base64Image: string,
+  settings: PhotoSettings
+): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    
+    img.onload = () => {
+      // Create canvas
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Canvas not supported'));
+        return;
+      }
+
+      // Set size for ID photo (3x4 ratio)
+      const targetWidth = 600;
+      const targetHeight = 800;
+      canvas.width = targetWidth;
+      canvas.height = targetHeight;
+
+      // Fill background color
+      ctx.fillStyle = getBackgroundHex(settings.background);
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+      // Calculate scaling to fit image
+      const scale = Math.max(
+        targetWidth / img.width,
+        targetHeight / img.height
+      );
+      const scaledWidth = img.width * scale;
+      const scaledHeight = img.height * scale;
+      
+      // Center the image
+      const x = (targetWidth - scaledWidth) / 2;
+      const y = (targetHeight - scaledHeight) / 2;
+
+      // Apply basic filters for beauty
+      if (settings.beautyLevel > 0) {
+        ctx.filter = `blur(${settings.beautyLevel / 50}px) brightness(${1 + settings.skinBrightening / 200})`;
+      }
+
+      // Draw image
+      ctx.drawImage(img, x, y, scaledWidth, scaledHeight);
+
+      // Reset filter
+      ctx.filter = 'none';
+
+      // Add subtle vignette for professional look
+      const gradient = ctx.createRadialGradient(
+        targetWidth / 2, targetHeight / 2, 0,
+        targetWidth / 2, targetHeight / 2, targetWidth * 0.7
+      );
+      gradient.addColorStop(0, 'rgba(0,0,0,0)');
+      gradient.addColorStop(1, 'rgba(0,0,0,0.1)');
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, targetWidth, targetHeight);
+
+      // Convert to base64
+      resolve(canvas.toDataURL('image/png', 0.95));
+    };
+
+    img.onerror = () => reject(new Error('Failed to load image'));
+    img.src = base64Image;
+  });
+};
+
+// Main function with AI analysis
 export const processIDPhoto = async (
   base64Image: string,
   settings: PhotoSettings,
   customApiKey?: string
 ): Promise<string> => {
-  // Ưu tiên sử dụng customApiKey nếu có, nếu không thì dùng process.env.API_KEY
   const apiKey = customApiKey || process.env.API_KEY;
-  if (!apiKey) throw new Error("API Key is missing. Please configure it in settings.");
-  
-  const ai = new GoogleGenAI({ apiKey: apiKey });
-  
-  const imageData = base64Image.split(',')[1] || base64Image;
-
-  const prompt = `
-    TASK: Transform this portrait into a high-quality, professional STANDARD ID PHOTO.
-    
-    USER TARGET: ${settings.target} (${settings.gender})
-    
-    COMPOSITION & CROPPING:
-    - CENTER the face perfectly. Ensure head and shoulders are fully visible.
-    - HEAD SIZE: Should occupy 70-80% of the image height.
-    - BACKGROUND: Replace the current background with a SOLID, FLAT ${settings.background} color. No shadows, no gradients.
-    - CLOTHING: ${settings.clothing === 'Giữ nguyên' ? 'Keep original clothing but clean it up to look professional' : `Replace the current clothing with a professional ${settings.clothing}`}.
-    - HAIR: ${settings.hair === 'Giữ nguyên' ? 'Keep original hair but make it look very neat and tidy' : `Style the hair as ${settings.hair} and make it look perfectly groomed`}.
-    
-    BEAUTY & ENHANCEMENT:
-    - Apply professional skin retouching (Level ${settings.beautyLevel}/100).
-    - Brighten the skin naturally (Level ${settings.skinBrightening}/100).
-    - Remove blemishes, flyaway hairs, and even out skin tone while maintaining natural identity.
-    
-    ADDITIONAL USER REQUEST: ${settings.customDescription || 'None'}
-
-    OUTPUT: One clean, sharp, professional ID photo. Ensure lighting is studio-quality and even.
-  `;
+  if (!apiKey) {
+    throw new Error("API Key is missing. Please configure it in settings.");
+  }
 
   try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-1.5-flash', // Sử dụng Flash model cho API key miễn phí
-      contents: {
-        parts: [
-          {
-            inlineData: { data: imageData, mimeType: 'image/jpeg' },
-          },
-          { text: prompt },
-        ],
+    // Method 1: Basic Canvas Processing (Fast, always works)
+    console.log('Processing image with Canvas...');
+    const processedImage = await processImageWithCanvas(base64Image, settings);
+
+    // Method 2: Optional AI Enhancement Analysis
+    // Uncomment if you want AI to analyze the photo quality
+    /*
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const imageData = base64Image.split(',')[1] || base64Image;
+    const prompt = `Analyze this portrait photo and provide suggestions to make it look more professional for an ID photo. 
+    Consider: lighting, composition, background, clothing appropriateness.
+    Keep response under 100 words.`;
+
+    const result = await model.generateContent([
+      {
+        inlineData: {
+          data: imageData,
+          mimeType: "image/jpeg"
+        }
       },
-      config: {
-        imageConfig: { 
-          aspectRatio: "3:4"
-          // imageSize: "1K" // gemini-2.5-flash-image không hỗ trợ imageSize, nó tự động chọn kích thước tối ưu.
-        }
-      }
-    });
+      prompt
+    ]);
 
-    let resultImage = '';
-    if (response.candidates?.[0]?.content?.parts) {
-      for (const part of response.candidates[0].content.parts) {
-        if (part.inlineData) {
-          resultImage = `data:image/png;base64,${part.inlineData.data}`;
-          break;
-        }
-      }
-    }
+    const analysis = result.response.text();
+    console.log('AI Analysis:', analysis);
+    */
 
-    if (!resultImage) throw new Error("AI failed to generate image. Please check your API key and network.");
-    return resultImage;
+    return processedImage;
+
   } catch (error: any) {
-    console.error("Gemini Error:", error);
+    console.error("Processing Error:", error);
+    
+    // Fallback: Just return basic canvas processing
+    if (error.message?.includes('API')) {
+      console.log('AI failed, using basic processing...');
+      return processImageWithCanvas(base64Image, settings);
+    }
+    
     throw error;
   }
 };
+
+/**
+ * ALTERNATIVE: Nếu muốn dùng API chỉnh sửa ảnh thật sự, dùng các service này:
+ * 
+ * 1. Replicate API (Stable Diffusion)
+ *    - https://replicate.com/
+ *    - Model: stability-ai/sdxl
+ *    - Có Image-to-Image
+ * 
+ * 2. Remove.bg API
+ *    - https://www.remove.bg/api
+ *    - Xóa background tự động
+ * 
+ * 3. Cloudinary AI
+ *    - https://cloudinary.com/
+ *    - Background removal, generative fill
+ * 
+ * 4. Face++ API
+ *    - https://www.faceplusplus.com/
+ *    - Face beautification, skin smoothing
+ */
