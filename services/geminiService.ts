@@ -39,7 +39,7 @@ export const processIDPhoto = async (
 
   try {
     const response = await ai.models.generateContent({
-      model: 'gemini-2.5-flash-image', // Sử dụng Flash model cho API key miễn phí
+      model: 'gemini-1.5-flash', // Sử dụng Flash model cho API key miễn phí
       contents: {
         parts: [
           {
