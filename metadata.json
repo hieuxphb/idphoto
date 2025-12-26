@@ -1,0 +1,7 @@
+{
+  "name": "Copy of AI ID Photo Pro",
+  "description": "Professional AI-powered ID photo generator with automatic face alignment, clothing change, and print layout preparation.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
